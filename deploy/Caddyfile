@@ -1,0 +1,25 @@
+{
+	email {$ACME_EMAIL}
+}
+
+{$BUDGET_DOMAIN} {
+	encode gzip zstd
+
+	handle {$BUDGET_BASE_PATH}/api/* {
+		reverse_proxy {$BACKEND_UPSTREAM}
+	}
+
+	handle {$BUDGET_BASE_PATH}/mcp {
+		reverse_proxy {$BACKEND_UPSTREAM}
+	}
+
+	handle {$BUDGET_BASE_PATH}/.well-known/oauth-protected-resource* {
+		reverse_proxy {$BACKEND_UPSTREAM}
+	}
+
+	handle_path {$BUDGET_BASE_PATH}* {
+		root * {$FRONTEND_DIST}
+		try_files {path} /index.html
+		file_server
+	}
+}
