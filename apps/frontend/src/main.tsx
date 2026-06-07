@@ -151,7 +151,7 @@ function App() {
         scenarioId={route.scenarioId}
         auth={auth}
         onLogout={handleLogout}
-        onNavigateHome={() => navigate("/")}
+        onNavigateHome={() => navigate(appPath("/"))}
       />
     );
   }
