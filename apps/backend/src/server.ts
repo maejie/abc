@@ -410,6 +410,62 @@ function mcpTools() {
       },
     },
     {
+      name: "create_series",
+      description: [
+        "Create one series in a scenario and recalculate formulas.",
+        "Important modeling guidance: when adding income or expense, avoid creating a single manual amount if a unit structure can be inferred.",
+        "Prefer adding parameter series such as quantity, users, headcount, unitPrice, or unitCost, then create the income/expense series with a formula like users * unitPrice or headcount * unitCost.",
+        "Only create a manual income/expense amount with no formula when no plausible parameter structure is available.",
+      ].join(" "),
+      inputSchema: {
+        type: "object",
+        properties: {
+          budgetId: { type: "string" },
+          scenarioId: { type: "string" },
+          key: { type: "string", description: "Unique formula-safe key, e.g. marketingCost or unitPrice." },
+          name: { type: "string" },
+          type: { type: "string", enum: ["income", "expense", "parameter", "calculated"] },
+          formula: { type: "string", description: "Optional series-level formula. Do not use eval syntax; use series keys and arithmetic." },
+          unit: { type: "string", description: "Optional display unit, e.g. JPY/user, people, users." },
+        },
+        required: ["budgetId", "scenarioId", "key", "name", "type"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "update_series",
+      description: "Update an existing series definition, including key, name, type, formula, and unit. Recalculates affected values and publishes live updates.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          budgetId: { type: "string" },
+          scenarioId: { type: "string" },
+          seriesId: { type: "string" },
+          key: { type: "string" },
+          name: { type: "string" },
+          type: { type: "string", enum: ["income", "expense", "parameter", "calculated"] },
+          formula: { type: "string" },
+          unit: { type: "string" },
+        },
+        required: ["budgetId", "scenarioId", "seriesId"],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: "delete_series",
+      description: "Delete a series from a scenario, remove its values and formula bindings, then recalculate affected downstream values.",
+      inputSchema: {
+        type: "object",
+        properties: {
+          budgetId: { type: "string" },
+          scenarioId: { type: "string" },
+          seriesId: { type: "string" },
+        },
+        required: ["budgetId", "scenarioId", "seriesId"],
+        additionalProperties: false,
+      },
+    },
+    {
       name: "create_budget",
       description: "Create a budget owned by the authenticated user with a default Base Case scenario.",
       inputSchema: {
@@ -479,6 +535,47 @@ async function callMcpTool(name: string, args: Record<string, unknown>, currentU
     const updatedValues = updateManualValue(state, body.seriesId, body.period, body.value);
     publishScenarioState(state);
     return { updatedValues };
+  }
+
+  if (name === "create_series") {
+    const state = findAccessibleState(stringField(args, "budgetId"), stringField(args, "scenarioId"), currentUser.id);
+    const body: CreateSeriesRequest = {
+      key: stringField(args, "key"),
+      name: stringField(args, "name"),
+      type: seriesTypeField(args, "type"),
+      formula: optionalStringField(args, "formula"),
+      unit: optionalStringField(args, "unit"),
+    };
+    validateSeriesMutation(body, false);
+    const { series, updatedValues } = createSeries(state, body);
+    publishScenarioState(state);
+    return { series, state, updatedValues };
+  }
+
+  if (name === "update_series") {
+    const state = findAccessibleState(stringField(args, "budgetId"), stringField(args, "scenarioId"), currentUser.id);
+    const body: UpdateSeriesRequest = {};
+    const key = optionalStringField(args, "key");
+    const seriesName = optionalStringField(args, "name");
+    const type = optionalSeriesTypeField(args, "type");
+    const formula = optionalStringField(args, "formula");
+    const unit = optionalStringField(args, "unit");
+    if (key !== undefined) body.key = key;
+    if (seriesName !== undefined) body.name = seriesName;
+    if (type !== undefined) body.type = type;
+    if (formula !== undefined) body.formula = formula;
+    if (unit !== undefined) body.unit = unit;
+    validateSeriesMutation(body, true);
+    const { series, updatedValues } = updateSeriesDetails(state, stringField(args, "seriesId"), body);
+    publishScenarioState(state);
+    return { series, state, updatedValues };
+  }
+
+  if (name === "delete_series") {
+    const state = findAccessibleState(stringField(args, "budgetId"), stringField(args, "scenarioId"), currentUser.id);
+    const updatedValues = deleteSeries(state, stringField(args, "seriesId")).updatedValues;
+    publishScenarioState(state);
+    return { state, updatedValues };
   }
 
   if (name === "create_budget") {
@@ -554,6 +651,36 @@ function stringField(input: Record<string, unknown>, field: string): string {
     throw httpError(400, `${field} is required`);
   }
   return value;
+}
+
+function optionalStringField(input: Record<string, unknown>, field: string): string | undefined {
+  const value = input[field];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string") {
+    throw httpError(400, `${field} must be a string`);
+  }
+  return value;
+}
+
+function seriesTypeField(input: Record<string, unknown>, field: string): Series["type"] {
+  const value = stringField(input, field);
+  if (!isSeriesType(value)) {
+    throw httpError(400, `${field} must be income, expense, parameter, or calculated`);
+  }
+  return value;
+}
+
+function optionalSeriesTypeField(input: Record<string, unknown>, field: string): Series["type"] | undefined {
+  const value = input[field];
+  if (value === undefined) return undefined;
+  if (typeof value !== "string" || !isSeriesType(value)) {
+    throw httpError(400, `${field} must be income, expense, parameter, or calculated`);
+  }
+  return value;
+}
+
+function isSeriesType(value: string): value is Series["type"] {
+  return ["income", "expense", "parameter", "calculated"].includes(value);
 }
 
 function numberField(input: Record<string, unknown>, field: string): number {

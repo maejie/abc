@@ -104,9 +104,14 @@ Available MCP tools:
 - `list_budgets`
 - `get_scenario_state`
 - `update_value`
+- `create_series`
+- `update_series`
+- `delete_series`
 - `create_budget`
 - `create_scenario`
 - `share_budget`
+
+When using MCP to add income or expense series, prefer a unit-based structure instead of a single manual amount. Add parameter series for drivers such as users, quantity, headcount, unit price, or unit cost, then add the income/expense series with a formula such as `users * unitPrice` or `headcount * unitCost` whenever that structure can be reasonably inferred.
 
 MCP updates reuse the same domain logic and publish the same SSE scenario updates as the browser UI.
 
@@ -116,9 +121,7 @@ Use Google sign-in for production and leave passwordless auth off:
 
 ```bash
 cp .env.prod.example .env
-pnpm --filter backend build
-pnpm --filter frontend build
-pnpm --filter backend start
+pnpm deploy:prod
 ```
 
 The backend can serve HTTPS directly when certificate files are already available:
@@ -134,6 +137,15 @@ BUDGET_DOMAIN=example.com BUDGET_BASE_PATH=/abc ACME_EMAIL=admin@example.com BAC
 ```
 
 Set `BUDGET_BASE_PATH` to the same value as `APP_BASE_PATH`; use an empty value for domain-root deployment or `/abc` for subpath deployment. Caddy serves the built frontend over HTTPS, renews certificates automatically, and proxies `${BUDGET_BASE_PATH}/api/*`, `${BUDGET_BASE_PATH}/mcp`, and OAuth metadata requests to the backend.
+
+For pm2-based deployments, `pnpm deploy:prod` builds all workspaces, replaces the contents of `FRONTEND_DIST`, and restarts the backend with `pm2 restart ${PM2_APP_NAME}`. Configure both values in the root `.env` file:
+
+```bash
+FRONTEND_DIST=/var/www/abc
+PM2_APP_NAME=budget-backend
+```
+
+Set `DEPLOY_SKIP_PM2_RESTART=true` if you only want to rebuild and sync the frontend output without restarting pm2.
 
 ## Seed Scenario
 

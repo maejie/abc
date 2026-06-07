@@ -1,25 +1,52 @@
-{
-	email {$ACME_EMAIL}
-}
+# The Caddyfile is an easy way to configure your Caddy web server.
+#
+# maejie.com uses automatic HTTPS. Ensure the domain's A/AAAA DNS records
+# point to this machine's public IP.
 
-{$BUDGET_DOMAIN} {
+maejie.com {
+	log {
+		output file /var/log/caddy/access.log
+		format console
+	}
+
 	encode gzip zstd
 
-	handle {$BUDGET_BASE_PATH}/api/* {
-		reverse_proxy {$BACKEND_UPSTREAM}
-	}
+	route {
+		redir /abc /abc/
 
-	handle {$BUDGET_BASE_PATH}/mcp {
-		reverse_proxy {$BACKEND_UPSTREAM}
-	}
+		# Backend JSON API.
+		handle /abc/api/* {
+			reverse_proxy 127.0.0.1:4000
+		}
 
-	handle {$BUDGET_BASE_PATH}/.well-known/oauth-protected-resource* {
-		reverse_proxy {$BACKEND_UPSTREAM}
-	}
+		# Remote MCP endpoint. This must be before the /abc/* static SPA route.
+		handle /abc/mcp {
+			reverse_proxy 127.0.0.1:4000
+		}
 
-	handle_path {$BUDGET_BASE_PATH}* {
-		root * {$FRONTEND_DIST}
-		try_files {path} /index.html
-		file_server
+		# App-relative OAuth protected resource metadata.
+		handle /abc/.well-known/oauth-protected-resource* {
+			reverse_proxy 127.0.0.1:4000
+		}
+
+		# RFC 9728 derives protected resource metadata by inserting
+		# /.well-known/oauth-protected-resource before the resource path.
+		# For https://maejie.com/abc/mcp, clients may request:
+		#   /.well-known/oauth-protected-resource/abc/mcp
+		handle /.well-known/oauth-protected-resource* {
+			rewrite * /abc/.well-known/oauth-protected-resource
+			reverse_proxy 127.0.0.1:4000
+		}
+
+		# Frontend SPA. Keep this after API/MCP/well-known routes.
+		handle_path /abc/* {
+			root * /var/www/abc
+			try_files {path} /index.html
+			file_server
+		}
+
+		handle {
+			respond 404
+		}
 	}
 }

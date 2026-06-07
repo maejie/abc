@@ -5,7 +5,8 @@
   "scripts": {
     "dev": "pnpm --parallel --filter backend --filter frontend dev",
     "build": "pnpm -r build",
-    "typecheck": "pnpm -r typecheck"
+    "typecheck": "pnpm -r typecheck",
+    "deploy:prod": "node scripts/deploy-production.mjs"
   },
   "devDependencies": {
     "typescript": "^5.4.5"
