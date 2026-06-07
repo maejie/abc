@@ -112,6 +112,7 @@ const googleScope = "openid email profile";
 const googleClientId = (import.meta.env.VITE_GOOGLE_CLIENT_ID ?? "").trim();
 const allowPasswordlessAuth = import.meta.env.VITE_ALLOW_PASSWORDLESS_AUTH === "true";
 const appBasePath = normalizeBasePath(import.meta.env.VITE_APP_BASE_PATH ?? import.meta.env.BASE_URL ?? "/");
+const liveUpdateFlashMs = 900;
 
 function App() {
   const [path, setPath] = React.useState(window.location.pathname);
@@ -477,6 +478,8 @@ function ScenarioPage(props: {
   const [seriesModalMode, setSeriesModalMode] = React.useState<SeriesModalMode | null>(null);
   const [formulaEditor, setFormulaEditor] = React.useState<FormulaEditorState | null>(null);
   const [focusedLocation, setFocusedLocation] = React.useState<CellLocation | null>(null);
+  const [flashedCells, setFlashedCells] = React.useState<Set<string>>(() => new Set());
+  const flashTimerRef = React.useRef<number | null>(null);
   const apiBase = scenarioApiBase(budgetId, scenarioId);
 
   React.useEffect(() => {
@@ -485,6 +488,7 @@ function ScenarioPage(props: {
     setFormulaEditor(null);
     setSeriesModalMode(null);
     setFocusedLocation(null);
+    setFlashedCells(new Set());
     authFetch(`${apiBase}/state`, auth)
       .then(async (response) => {
         if (!response.ok) throw new Error(await response.text());
@@ -498,7 +502,7 @@ function ScenarioPage(props: {
     const events = new EventSource(authEventStreamUrl(`${apiBase}/events`, auth));
     events.addEventListener("scenario-state", (event) => {
       try {
-        setState(JSON.parse((event as MessageEvent<string>).data) as AppState);
+        applyLiveState(JSON.parse((event as MessageEvent<string>).data) as AppState);
       } catch {
         setError("Failed to apply live update");
       }
@@ -508,6 +512,33 @@ function ScenarioPage(props: {
     };
     return () => events.close();
   }, [apiBase, auth]);
+
+  React.useEffect(() => {
+    return () => {
+      if (flashTimerRef.current !== null) {
+        window.clearTimeout(flashTimerRef.current);
+      }
+    };
+  }, []);
+
+  function applyLiveState(nextState: AppState) {
+    setState((current) => {
+      if (current) {
+        const changed = changedValueCellKeys(current.values, nextState.values);
+        if (changed.size > 0) {
+          setFlashedCells(changed);
+          if (flashTimerRef.current !== null) {
+            window.clearTimeout(flashTimerRef.current);
+          }
+          flashTimerRef.current = window.setTimeout(() => {
+            setFlashedCells(new Set());
+            flashTimerRef.current = null;
+          }, liveUpdateFlashMs);
+        }
+      }
+      return nextState;
+    });
+  }
 
   if (error && !state) {
     return (
@@ -533,7 +564,7 @@ function ScenarioPage(props: {
     ...state.periods.map((period) => ({ columnId: period, width: 120 })),
   ];
 
-  const rows = buildRows(state, savingCell);
+  const rows = buildRows(state, savingCell, flashedCells);
 
   const handleCellsChanged: NonNullable<ReactGridProps["onCellsChanged"]> = (changes) => {
     void handleTextCellChanges(changes);
@@ -1003,7 +1034,7 @@ function FormulaEditorWindow(props: {
   );
 }
 
-function buildRows(state: AppState, savingCell: string | null): Row<GridCell>[] {
+function buildRows(state: AppState, savingCell: string | null, flashedCells: Set<string>): Row<GridCell>[] {
   const headerCells: GridCell[] = [
     headerCell("Series"),
     headerCell("Type"),
@@ -1030,7 +1061,7 @@ function buildRows(state: AppState, savingCell: string | null): Row<GridCell>[] 
           textCell(series.type, `type-cell ${rowClass}`, true),
           textCell(series.unit ?? "", rowClass, true),
           textCell(series.formula ?? "", `formula-cell ${rowClass}`, true),
-          ...state.periods.map((period) => valueCell(state, series, period, savingCell, rowClass)),
+          ...state.periods.map((period) => valueCell(state, series, period, savingCell, flashedCells, rowClass)),
         ],
       };
     });
@@ -1146,7 +1177,14 @@ function locationFromGridEvent(
   return { rowId: row.rowId, columnId: column.columnId };
 }
 
-function valueCell(state: AppState, series: Series, period: string, savingCell: string | null, rowClass: string): GridCell {
+function valueCell(
+  state: AppState,
+  series: Series,
+  period: string,
+  savingCell: string | null,
+  flashedCells: Set<string>,
+  rowClass: string,
+): GridCell {
   const value = state.values.find((item) => item.seriesId === series.id && item.period === period);
   const editable = isEditableSeries(series);
   if (value?.status === "error") {
@@ -1160,6 +1198,7 @@ function valueCell(state: AppState, series: Series, period: string, savingCell: 
     series.formula ? "formula-row" : "",
     (value?.value ?? 0) < 0 ? "negative-cell" : "",
     savingCell === `${series.id}:${period}` ? "saving-cell" : "",
+    flashedCells.has(`${series.id}:${period}`) ? "live-updated-cell" : "",
   ].filter(Boolean).join(" ");
 
   return numberCell(value?.value ?? 0, classes, !editable, (value?.value ?? 0) < 0 ? { color: "#b42318" } : undefined);
@@ -1384,6 +1423,24 @@ function applyUpdatedValues(current: Value[], updated: Value[]): Value[] {
     next.set(`${value.seriesId}:${value.period}`, value);
   }
   return [...next.values()];
+}
+
+function changedValueCellKeys(previous: Value[], next: Value[]): Set<string> {
+  const previousByKey = new Map(previous.map((value) => [`${value.seriesId}:${value.period}`, value]));
+  const changed = new Set<string>();
+  for (const value of next) {
+    const key = `${value.seriesId}:${value.period}`;
+    const previousValue = previousByKey.get(key);
+    if (
+      !previousValue ||
+      previousValue.value !== value.value ||
+      previousValue.status !== value.status ||
+      previousValue.errorMessage !== value.errorMessage
+    ) {
+      changed.add(key);
+    }
+  }
+  return changed;
 }
 
 ReactDOM.createRoot(document.getElementById("root")!).render(

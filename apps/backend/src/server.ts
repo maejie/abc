@@ -395,7 +395,7 @@ function mcpTools() {
     },
     {
       name: "update_value",
-      description: "Update one editable monthly value and recalculate affected series.",
+      description: "Update one or more editable monthly values and recalculate affected series. Pass either seriesId/period/value for one cell, or updates for bulk edits across multiple periods and series.",
       inputSchema: {
         type: "object",
         properties: {
@@ -404,8 +404,22 @@ function mcpTools() {
           seriesId: { type: "string" },
           period: { type: "string" },
           value: { type: "number" },
+          updates: {
+            type: "array",
+            description: "Bulk value updates. Use this for multiple months and/or multiple series in one MCP call.",
+            items: {
+              type: "object",
+              properties: {
+                seriesId: { type: "string" },
+                period: { type: "string" },
+                value: { type: "number" },
+              },
+              required: ["seriesId", "period", "value"],
+              additionalProperties: false,
+            },
+          },
         },
-        required: ["budgetId", "scenarioId", "seriesId", "period", "value"],
+        required: ["budgetId", "scenarioId"],
         additionalProperties: false,
       },
     },
@@ -521,20 +535,21 @@ async function callMcpTool(name: string, args: Record<string, unknown>, currentU
 
   if (name === "update_value") {
     const state = findAccessibleState(stringField(args, "budgetId"), stringField(args, "scenarioId"), currentUser.id);
-    const body: UpdateValueRequest = {
-      seriesId: stringField(args, "seriesId"),
-      period: stringField(args, "period"),
-      value: numberField(args, "value"),
-    };
-    validateValueUpdate(body);
-    const targetSeries = state.series.find((series) => series.id === body.seriesId);
-    if (!targetSeries) throw httpError(404, "Series not found");
-    if (targetSeries.formula || targetSeries.type === "calculated") {
-      throw httpError(400, "Formula-based series cannot be edited directly");
+    const updates = valueUpdateRequests(args);
+    const changed = new Map<string, Value>();
+    for (const body of updates) {
+      validateValueUpdate(body);
+      const targetSeries = state.series.find((series) => series.id === body.seriesId);
+      if (!targetSeries) throw httpError(404, `Series not found: ${body.seriesId}`);
+      if (targetSeries.formula || targetSeries.type === "calculated") {
+        throw httpError(400, `Formula-based series cannot be edited directly: ${targetSeries.name}`);
+      }
+      for (const value of updateManualValue(state, body.seriesId, body.period, body.value)) {
+        changed.set(`${value.seriesId}:${value.period}`, value);
+      }
     }
-    const updatedValues = updateManualValue(state, body.seriesId, body.period, body.value);
     publishScenarioState(state);
-    return { updatedValues };
+    return { updatedValues: [...changed.values()] };
   }
 
   if (name === "create_series") {
@@ -689,6 +704,32 @@ function numberField(input: Record<string, unknown>, field: string): number {
     throw httpError(400, `${field} must be a finite number`);
   }
   return value;
+}
+
+function valueUpdateRequests(input: Record<string, unknown>): UpdateValueRequest[] {
+  const rawUpdates = input.updates;
+  if (rawUpdates !== undefined) {
+    if (!Array.isArray(rawUpdates) || rawUpdates.length === 0) {
+      throw httpError(400, "updates must be a non-empty array");
+    }
+    return rawUpdates.map((item) => {
+      const update = objectParam(item);
+      return {
+        seriesId: stringField(update, "seriesId"),
+        period: stringField(update, "period"),
+        value: numberField(update, "value"),
+      };
+    });
+  }
+
+  if (input.seriesId === undefined || input.period === undefined || input.value === undefined) {
+    throw httpError(400, "Provide either updates or seriesId, period, and value");
+  }
+  return [{
+    seriesId: stringField(input, "seriesId"),
+    period: stringField(input, "period"),
+    value: numberField(input, "value"),
+  }];
 }
 
 function findState(budgetId: string, scenarioId: string) {

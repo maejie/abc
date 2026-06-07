@@ -103,7 +103,7 @@ Available MCP tools:
 
 - `list_budgets`
 - `get_scenario_state`
-- `update_value`
+- `update_value` for one value or bulk updates with `updates: [{ seriesId, period, value }]`
 - `create_series`
 - `update_series`
 - `delete_series`
