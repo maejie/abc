@@ -104,14 +104,14 @@ Available MCP tools:
 - `list_budgets`
 - `get_scenario_state`
 - `update_value` for one value or bulk updates with `updates: [{ seriesId, period, value }]`
-- `create_series`
+- `create_series` for one series or bulk creation with `series: [{ key, name, type, formula, unit, initialValues }]`
 - `update_series`
 - `delete_series`
 - `create_budget`
 - `create_scenario`
 - `share_budget`
 
-When using MCP to add income or expense series, prefer a unit-based structure instead of a single manual amount. Add parameter series for drivers such as users, quantity, headcount, unit price, or unit cost, then add the income/expense series with a formula such as `users * unitPrice` or `headcount * unitCost` whenever that structure can be reasonably inferred.
+When using MCP to add income or expense series, prefer a unit-based structure instead of a single manual amount. Add parameter series for drivers such as users, quantity, headcount, unit price, or unit cost, then add the income/expense series with a formula such as `users * unitPrice` or `headcount * unitCost` whenever that structure can be reasonably inferred. For bulk creation, put parameter series before formula series that reference them, and use `initialValues` to seed monthly driver values in the same MCP call.
 
 MCP updates reuse the same domain logic and publish the same SSE scenario updates as the browser UI.
 

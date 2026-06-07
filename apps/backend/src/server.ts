@@ -55,6 +55,13 @@ interface JsonRpcRequest {
   params?: unknown;
 }
 
+interface SeriesCreationRequest extends CreateSeriesRequest {
+  initialValues?: Array<{
+    period: string;
+    value: number;
+  }>;
+}
+
 const requestHandler = async (request: IncomingMessage, response: ServerResponse) => {
   try {
     setCorsHeaders(response);
@@ -426,9 +433,10 @@ function mcpTools() {
     {
       name: "create_series",
       description: [
-        "Create one series in a scenario and recalculate formulas.",
+        "Create one or more series in a scenario, optionally assign initial monthly values, and recalculate formulas.",
         "Important modeling guidance: when adding income or expense, avoid creating a single manual amount if a unit structure can be inferred.",
         "Prefer adding parameter series such as quantity, users, headcount, unitPrice, or unitCost, then create the income/expense series with a formula like users * unitPrice or headcount * unitCost.",
+        "For bulk creation, put parameter series before formula series that reference them.",
         "Only create a manual income/expense amount with no formula when no plausible parameter structure is available.",
       ].join(" "),
       inputSchema: {
@@ -441,8 +449,50 @@ function mcpTools() {
           type: { type: "string", enum: ["income", "expense", "parameter", "calculated"] },
           formula: { type: "string", description: "Optional series-level formula. Do not use eval syntax; use series keys and arithmetic." },
           unit: { type: "string", description: "Optional display unit, e.g. JPY/user, people, users." },
+          initialValues: {
+            type: "array",
+            description: "Optional initial monthly values for this single series. Only allowed for editable series.",
+            items: {
+              type: "object",
+              properties: {
+                period: { type: "string" },
+                value: { type: "number" },
+              },
+              required: ["period", "value"],
+              additionalProperties: false,
+            },
+          },
+          series: {
+            type: "array",
+            description: "Bulk series creation. Use this to add parameters and formula-based income/expense series in one call.",
+            items: {
+              type: "object",
+              properties: {
+                key: { type: "string" },
+                name: { type: "string" },
+                type: { type: "string", enum: ["income", "expense", "parameter", "calculated"] },
+                formula: { type: "string" },
+                unit: { type: "string" },
+                initialValues: {
+                  type: "array",
+                  description: "Optional initial monthly values for editable series.",
+                  items: {
+                    type: "object",
+                    properties: {
+                      period: { type: "string" },
+                      value: { type: "number" },
+                    },
+                    required: ["period", "value"],
+                    additionalProperties: false,
+                  },
+                },
+              },
+              required: ["key", "name", "type"],
+              additionalProperties: false,
+            },
+          },
         },
-        required: ["budgetId", "scenarioId", "key", "name", "type"],
+        required: ["budgetId", "scenarioId"],
         additionalProperties: false,
       },
     },
@@ -554,17 +604,41 @@ async function callMcpTool(name: string, args: Record<string, unknown>, currentU
 
   if (name === "create_series") {
     const state = findAccessibleState(stringField(args, "budgetId"), stringField(args, "scenarioId"), currentUser.id);
-    const body: CreateSeriesRequest = {
-      key: stringField(args, "key"),
-      name: stringField(args, "name"),
-      type: seriesTypeField(args, "type"),
-      formula: optionalStringField(args, "formula"),
-      unit: optionalStringField(args, "unit"),
-    };
-    validateSeriesMutation(body, false);
-    const { series, updatedValues } = createSeries(state, body);
+    const creations = seriesCreationRequests(args);
+    const snapshot = snapshotAppState(state);
+    const createdSeries: Series[] = [];
+    const changed = new Map<string, Value>();
+    try {
+      for (const creation of creations) {
+        validateSeriesMutation(creation, false);
+        const { series, updatedValues } = createSeries(state, creation);
+        createdSeries.push(series);
+        for (const value of updatedValues) {
+          changed.set(`${value.seriesId}:${value.period}`, value);
+        }
+        if (creation.initialValues?.length) {
+          if (!isEditableSeriesForManualValues(series)) {
+            throw httpError(400, `Initial values cannot be assigned to formula-based series: ${series.name}`);
+          }
+          for (const initialValue of creation.initialValues) {
+            const update: UpdateValueRequest = {
+              seriesId: series.id,
+              period: initialValue.period,
+              value: initialValue.value,
+            };
+            validateValueUpdate(update);
+            for (const value of updateManualValue(state, update.seriesId, update.period, update.value)) {
+              changed.set(`${value.seriesId}:${value.period}`, value);
+            }
+          }
+        }
+      }
+    } catch (error) {
+      restoreAppState(state, snapshot);
+      throw error;
+    }
     publishScenarioState(state);
-    return { series, state, updatedValues };
+    return { series: createdSeries[0], createdSeries, state, updatedValues: [...changed.values()] };
   }
 
   if (name === "update_series") {
@@ -730,6 +804,65 @@ function valueUpdateRequests(input: Record<string, unknown>): UpdateValueRequest
     period: stringField(input, "period"),
     value: numberField(input, "value"),
   }];
+}
+
+function seriesCreationRequests(input: Record<string, unknown>): SeriesCreationRequest[] {
+  const rawSeries = input.series;
+  if (rawSeries !== undefined) {
+    if (!Array.isArray(rawSeries) || rawSeries.length === 0) {
+      throw httpError(400, "series must be a non-empty array");
+    }
+    return rawSeries.map((item) => seriesCreationRequestFromObject(objectParam(item)));
+  }
+
+  if (input.key === undefined || input.name === undefined || input.type === undefined) {
+    throw httpError(400, "Provide either series or key, name, and type");
+  }
+  return [seriesCreationRequestFromObject(input)];
+}
+
+function seriesCreationRequestFromObject(input: Record<string, unknown>): SeriesCreationRequest {
+  return {
+    key: stringField(input, "key"),
+    name: stringField(input, "name"),
+    type: seriesTypeField(input, "type"),
+    formula: optionalStringField(input, "formula"),
+    unit: optionalStringField(input, "unit"),
+    initialValues: initialValuesField(input),
+  };
+}
+
+function initialValuesField(input: Record<string, unknown>): SeriesCreationRequest["initialValues"] {
+  const rawInitialValues = input.initialValues;
+  if (rawInitialValues === undefined) return undefined;
+  if (!Array.isArray(rawInitialValues)) {
+    throw httpError(400, "initialValues must be an array");
+  }
+  return rawInitialValues.map((item) => {
+    const value = objectParam(item);
+    return {
+      period: stringField(value, "period"),
+      value: numberField(value, "value"),
+    };
+  });
+}
+
+function isEditableSeriesForManualValues(series: Series): boolean {
+  return series.type === "parameter" || ((series.type === "income" || series.type === "expense") && !series.formula);
+}
+
+function snapshotAppState(state: AppState): Pick<AppState, "series" | "values" | "formulaBindings"> {
+  return {
+    series: state.series.map((series) => ({ ...series })),
+    values: state.values.map((value) => ({ ...value })),
+    formulaBindings: state.formulaBindings.map((binding) => ({ ...binding })),
+  };
+}
+
+function restoreAppState(state: AppState, snapshot: Pick<AppState, "series" | "values" | "formulaBindings">): void {
+  state.series = snapshot.series.map((series) => ({ ...series }));
+  state.values = snapshot.values.map((value) => ({ ...value }));
+  state.formulaBindings = snapshot.formulaBindings.map((binding) => ({ ...binding }));
 }
 
 function findState(budgetId: string, scenarioId: string) {
